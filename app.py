@@ -10,7 +10,7 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# 1. PROPIEDADES TERMODINÁMICAS Y DATOS DEL ELUATO DLE
+# 1. PROPIEDADES TERMODINÁMICAS Y CONSTANTES
 # ==============================================================================
 MOLAR_MASS = {
     'Li': 6.941, 'Na': 22.989, 'K': 39.098, 'Mg': 24.305, 'Ca': 40.078,
@@ -20,11 +20,6 @@ MOLAR_MASS = {
 VALENCIAS = {
     'Li': 1, 'Na': 1, 'K': 1, 'Mg': 2, 'Ca': 2,
     'B': 1, 'SO4': 2, 'Cl': 1, 'CO3': 2, 'HCO3': 1
-}
-
-ELUATO_DLE_INIT = {
-    'Li': 639.496, 'Na': 428.557, 'K': 29.233, 'Mg': 3.630, 'Ca': 1.995,
-    'B': 175.739, 'SO4': 874.200, 'Cl': 3539.000, 'CO3': 0.00273, 'HCO3': 0.074
 }
 
 RECHAZO_IONICO = {
@@ -77,7 +72,7 @@ def calcular_presion_osmotica_pitzer(concentraciones_mg_l, temp_c):
     # Presión osmótica ajustada por Pitzer
     return phi_pitzer * molaridad_total * r_const * temp_k
 
-def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_perm, usar_pitzer=False):
+def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_perm, eluato_init, usar_pitzer=False):
     rec_frac = rec_target / 100.0
     q_perm = q_feed * rec_frac
     q_conc = q_feed - q_perm
@@ -85,12 +80,12 @@ def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_pe
     # Selección de modelo termodinámico
     calc_pi = calcular_presion_osmotica_pitzer if usar_pitzer else calcular_presion_osmotica_vant_hoff
 
-    pi_feed = calc_pi(ELUATO_DLE_INIT, temp_c)
+    pi_feed = calc_pi(eluato_init, temp_c)
 
     conc_reject = {}
     conc_perm = {}
 
-    for ion, c_feed in ELUATO_DLE_INIT.items():
+    for ion, c_feed in eluato_init.items():
         r_ion = RECHAZO_IONICO[ion]
         c_p = c_feed * (1.0 - r_ion)
         conc_perm[ion] = c_p
@@ -156,6 +151,26 @@ with st.sidebar:
     rec_in = st.slider("4. Recuperación Deseada (%)", min_value=10.0, max_value=90.0, value=float(def_rec), step=1.0)
     a_in = st.number_input("5. Permeabilidad Membrana 'A' (L/m²·h·bar)", min_value=0.1, value=float(def_a), step=0.1)
 
+    st.markdown("---")
+    st.header("🧪 Composición Eluato DLE")
+    st.markdown("Ingrese las concentraciones iniciales (mg/L):")
+    
+    default_eluato = {
+        'Li': 639.496, 'Na': 428.557, 'K': 29.233, 'Mg': 3.630, 'Ca': 1.995,
+        'B': 175.739, 'SO4': 874.200, 'Cl': 3539.000, 'CO3': 0.00273, 'HCO3': 0.074
+    }
+    
+    eluato_dle_init = {}
+    with st.expander("Modificar concentraciones iónicas", expanded=True):
+        for ion, default_val in default_eluato.items():
+            eluato_dle_init[ion] = st.number_input(
+                f"[{ion}] (mg/L)", 
+                min_value=0.0, 
+                value=float(default_val), 
+                step=0.0001 if default_val < 1.0 else 0.1, 
+                format="%.5f" if default_val < 1.0 else "%.2f"
+            )
+
 # Determinar si se activa Pitzer
 usar_pitzer = True if tipo_ro == "Alta Presión (SWRO)" else False
 
@@ -163,16 +178,16 @@ usar_pitzer = True if tipo_ro == "Alta Presión (SWRO)" else False
 # 4. EJECUCIÓN Y REPORTE VISUAL DE INGENIERÍA
 # ==============================================================================
 try:
-    res = simular_osmosis_inversa_etapa_unica(q_in, rec_in, p_in, t_in, a_in, usar_pitzer=usar_pitzer)
+    res = simular_osmosis_inversa_etapa_unica(q_in, rec_in, p_in, t_in, a_in, eluato_dle_init, usar_pitzer=usar_pitzer)
     
     # SECCIÓN 1: INDICADORES PRINCIPALES (KPIs)
     st.markdown(f"### 📊 Indicadores Clave de Concentración (Li+) — Modelo activo: *{res['modelo_usado']}*")
     
-    li_in = ELUATO_DLE_INIT['Li']
+    li_in = eluato_dle_init['Li']
     li_out = res['conc_reject']['Li']
     li_perm = res['conc_perm']['Li']
-    factor_conc = li_out / li_in
-    tds_in = sum(ELUATO_DLE_INIT.values())
+    factor_conc = li_out / li_in if li_in > 0 else 0.0
+    tds_in = sum(eluato_dle_init.values())
     tds_out = sum(res['conc_reject'].values())
     
     col1, col2, col3, col4 = st.columns(4)
@@ -208,10 +223,10 @@ try:
         
     with tab2:
         df_quimico = pd.DataFrame({
-            'Ion / Especie': list(ELUATO_DLE_INIT.keys()),
-            'Alimentación (mg/L)': [ELUATO_DLE_INIT[k] for k in ELUATO_DLE_INIT],
-            'Salmuera Concentrada (mg/L)': [res['conc_reject'][k] for k in ELUATO_DLE_INIT],
-            'Permeado - Agua Extraída (mg/L)': [res['conc_perm'][k] for k in ELUATO_DLE_INIT]
+            'Ion / Especie': list(eluato_dle_init.keys()),
+            'Alimentación (mg/L)': [eluato_dle_init[k] for k in eluato_dle_init],
+            'Salmuera Concentrada (mg/L)': [res['conc_reject'][k] for k in eluato_dle_init],
+            'Permeado - Agua Extraída (mg/L)': [res['conc_perm'][k] for k in eluato_dle_init]
         })
         st.dataframe(df_quimico.round(2), use_container_width=True, hide_index=True)
 
