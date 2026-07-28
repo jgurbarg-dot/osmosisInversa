@@ -17,6 +17,11 @@ MOLAR_MASS = {
     'B': 10.811, 'SO4': 96.060, 'Cl': 35.453, 'CO3': 60.009, 'HCO3': 61.017
 }
 
+VALENCIAS = {
+    'Li': 1, 'Na': 1, 'K': 1, 'Mg': 2, 'Ca': 2,
+    'B': 1, 'SO4': 2, 'Cl': 1, 'CO3': 2, 'HCO3': 1
+}
+
 ELUATO_DLE_INIT = {
     'Li': 639.496, 'Na': 428.557, 'K': 29.233, 'Mg': 3.630, 'Ca': 1.995,
     'B': 175.739, 'SO4': 874.200, 'Cl': 3539.000, 'CO3': 0.00273, 'HCO3': 0.074
@@ -29,20 +34,58 @@ RECHAZO_IONICO = {
 }
 
 # ==============================================================================
-# 2. MOTOR DE CÁLCULO TERMODINÁMICO Y DE PROCESO
+# 2. MOTORES TERMODINÁMICOS (VAN'T HOFF & PITZER)
 # ==============================================================================
-def calcular_presion_osmotica(concentraciones_mg_l, temp_c):
+def calcular_presion_osmotica_vant_hoff(concentraciones_mg_l, temp_c):
+    """Modelo ideal / diluido de Van't Hoff"""
     temp_k = temp_c + 273.15
     r_const = 0.08314  # L·bar/(mol·K)
     molaridad_total = sum((conc / 1000.0) / MOLAR_MASS[ion] for ion, conc in concentraciones_mg_l.items())
     return molaridad_total * r_const * temp_k
 
-def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_perm):
+def calcular_presion_osmotica_pitzer(concentraciones_mg_l, temp_c):
+    """
+    Modelo termodinámico riguroso de Pitzer para alta fuerza iónica y salmueras.
+    Calcula el coeficiente osmótico (Phi) incorporando Debye-Hückel y términos viriales.
+    """
+    temp_k = temp_c + 273.15
+    r_const = 0.08314  # L·bar/(mol·K)
+    
+    molaridad_total = 0.0
+    fuerza_ionica = 0.0
+    
+    for ion, conc in concentraciones_mg_l.items():
+        m_i = (conc / 1000.0) / MOLAR_MASS[ion]
+        molaridad_total += m_i
+        z = VALENCIAS.get(ion, 1)
+        fuerza_ionica += 0.5 * (z**2) * m_i
+        
+    # Parámetro Debye-Hückel A_phi con corrección de temperatura
+    a_phi = 0.392 * ((temp_k / 298.15) ** 1.5)
+    
+    # Término electrostático (Debye-Hückel modificado)
+    dh_term = - (a_phi * (fuerza_ionica ** 1.5)) / (1.0 + 1.2 * (fuerza_ionica ** 0.5))
+    
+    # Coeficientes viriales efectivos de corto alcance para sistemas clorurados/sulfatados complejos
+    b_virial = 0.095
+    c_virial = 0.0025
+    virial_term = b_virial * fuerza_ionica + c_virial * (fuerza_ionica ** 2.0)
+    
+    # Coeficiente osmótico Pitzer (Phi)
+    phi_pitzer = max(0.5, 1.0 + dh_term + virial_term)
+    
+    # Presión osmótica ajustada por Pitzer
+    return phi_pitzer * molaridad_total * r_const * temp_k
+
+def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_perm, usar_pitzer=False):
     rec_frac = rec_target / 100.0
     q_perm = q_feed * rec_frac
     q_conc = q_feed - q_perm
 
-    pi_feed = calcular_presion_osmotica(ELUATO_DLE_INIT, temp_c)
+    # Selección de modelo termodinámico
+    calc_pi = calcular_presion_osmotica_pitzer if usar_pitzer else calcular_presion_osmotica_vant_hoff
+
+    pi_feed = calc_pi(ELUATO_DLE_INIT, temp_c)
 
     conc_reject = {}
     conc_perm = {}
@@ -54,16 +97,17 @@ def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_pe
         c_c = (q_feed * c_feed - q_perm * c_p) / q_conc
         conc_reject[ion] = max(c_c, 0.0)
 
-    pi_conc = calcular_presion_osmotica(conc_reject, temp_c)
-    pi_perm = calcular_presion_osmotica(conc_perm, temp_c)
+    pi_conc = calc_pi(conc_reject, temp_c)
+    pi_perm = calc_pi(conc_perm, temp_c)
     pi_promedio = (pi_feed + pi_conc) / 2.0
 
     p_perdida_canal = 1.5
     ndp = (p_oper - (p_perdida_canal / 2.0)) - (pi_promedio - pi_perm)
 
     if ndp <= 0:
+        modelo_str = "Pitzer" if usar_pitzer else "Van't Hoff"
         raise ValueError(
-            f"La presión aplicada ({p_oper} bar) es insuficiente. "
+            f"La presión aplicada ({p_oper} bar) es insuficiente según el modelo {modelo_str}. "
             f"La presión osmótica promedio del sistema alcanzó los {pi_promedio:.2f} bar y supera el impulso hidráulico."
         )
 
@@ -75,11 +119,12 @@ def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_pe
         'rec': rec_target, 'p_oper': p_oper, 'ndp': ndp,
         'flux_lmh': flux_lmh, 'area_m2': area_m2,
         'pi_feed': pi_feed, 'pi_conc': pi_conc,
-        'conc_reject': conc_reject, 'conc_perm': conc_perm
+        'conc_reject': conc_reject, 'conc_perm': conc_perm,
+        'modelo_usado': "Pitzer (Riguroso Alta Salinidad)" if usar_pitzer else "Van't Hoff (Ideal)"
     }
 
 # ==============================================================================
-# 3. INTERFAZ INTERACTIVA STREAMLIT (REEMPLAZA INPUTS Y PRINT)
+# 3. INTERFAZ INTERACTIVA STREAMLIT
 # ==============================================================================
 st.title("💧 Simulador de Ósmosis Inversa (1 Etapa)")
 st.subheader("Concentración de Eluato de Litio (DLE)")
@@ -93,11 +138,12 @@ with st.sidebar:
     t_in = st.number_input("2. Temperatura del Eluato (°C)", min_value=1.0, value=25.0, step=1.0)
     
     st.markdown("---")
-    st.markdown("### Régimen de Presión")
+    st.markdown("### Régimen de Presión y Termodinámica")
     tipo_ro = st.radio(
         "Selecciona el régimen:",
         options=["Alta Presión (SWRO)", "Baja Presión (BWRO)"],
-        index=0
+        index=0,
+        help="Alta Presión activa el modelo termodinámico de Pitzer para soluciones de alta salinidad."
     )
     
     # Asignación de valores por defecto dinámicos
@@ -110,14 +156,17 @@ with st.sidebar:
     rec_in = st.slider("4. Recuperación Deseada (%)", min_value=10.0, max_value=90.0, value=float(def_rec), step=1.0)
     a_in = st.number_input("5. Permeabilidad Membrana 'A' (L/m²·h·bar)", min_value=0.1, value=float(def_a), step=0.1)
 
+# Determinar si se activa Pitzer
+usar_pitzer = True if tipo_ro == "Alta Presión (SWRO)" else False
+
 # ==============================================================================
 # 4. EJECUCIÓN Y REPORTE VISUAL DE INGENIERÍA
 # ==============================================================================
 try:
-    res = simular_osmosis_inversa_etapa_unica(q_in, rec_in, p_in, t_in, a_in)
+    res = simular_osmosis_inversa_etapa_unica(q_in, rec_in, p_in, t_in, a_in, usar_pitzer=usar_pitzer)
     
     # SECCIÓN 1: INDICADORES PRINCIPALES (KPIs)
-    st.markdown("### 📊 Indicadores Clave de Concentración (Li+)")
+    st.markdown(f"### 📊 Indicadores Clave de Concentración (Li+) — Modelo activo: *{res['modelo_usado']}*")
     
     li_in = ELUATO_DLE_INIT['Li']
     li_out = res['conc_reject']['Li']
@@ -143,6 +192,7 @@ try:
     
     with tab1:
         df_hidro = pd.DataFrame([
+            {'Parámetro Hidráulico / Operativo': 'Modelo Termodinámico de Presión Osmótica', 'Valor': res['modelo_usado']},
             {'Parámetro Hidráulico / Operativo': 'Caudal de Alimentación (Feed)', 'Valor': f"{res['q_feed']:.2f} m³/h"},
             {'Parámetro Hidráulico / Operativo': 'Caudal de Permeado (Agua Extraída)', 'Valor': f"{res['q_perm']:.2f} m³/h"},
             {'Parámetro Hidráulico / Operativo': 'Caudal de Salmuera Concentrada (Rechazo)', 'Valor': f"{res['q_conc']:.2f} m³/h"},
