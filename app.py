@@ -36,13 +36,17 @@ def calcular_presion_osmotica_vant_hoff(concentraciones_mg_l, temp_c):
     temp_k = temp_c + 273.15
     r_const = 0.08314  # L·bar/(mol·K)
     molaridad_total = sum((conc / 1000.0) / MOLAR_MASS[ion] for ion, conc in concentraciones_mg_l.items())
-    return molaridad_total * r_const * temp_k
+    pi = molaridad_total * r_const * temp_k
+    
+    # Retornamos también los parámetros internos para el reporte
+    return pi, {
+        "molaridad_total": molaridad_total,
+        "temp_k": temp_k,
+        "phi": 1.0
+    }
 
 def calcular_presion_osmotica_pitzer(concentraciones_mg_l, temp_c):
-    """
-    Modelo termodinámico riguroso de Pitzer para alta fuerza iónica y salmueras.
-    Calcula el coeficiente osmótico (Phi) incorporando Debye-Hückel y términos viriales.
-    """
+    """Modelo termodinámico de Pitzer para alta fuerza iónica"""
     temp_k = temp_c + 273.15
     r_const = 0.08314  # L·bar/(mol·K)
     
@@ -55,13 +59,13 @@ def calcular_presion_osmotica_pitzer(concentraciones_mg_l, temp_c):
         z = VALENCIAS.get(ion, 1)
         fuerza_ionica += 0.5 * (z**2) * m_i
         
-    # Parámetro Debye-Hückel A_phi con corrección de temperatura
+    # Parámetro Debye-Hückel A_phi
     a_phi = 0.392 * ((temp_k / 298.15) ** 1.5)
     
     # Término electrostático (Debye-Hückel modificado)
     dh_term = - (a_phi * (fuerza_ionica ** 1.5)) / (1.0 + 1.2 * (fuerza_ionica ** 0.5))
     
-    # Coeficientes viriales efectivos de corto alcance para sistemas clorurados/sulfatados complejos
+    # Coeficientes viriales efectivos
     b_virial = 0.095
     c_virial = 0.0025
     virial_term = b_virial * fuerza_ionica + c_virial * (fuerza_ionica ** 2.0)
@@ -69,18 +73,27 @@ def calcular_presion_osmotica_pitzer(concentraciones_mg_l, temp_c):
     # Coeficiente osmótico Pitzer (Phi)
     phi_pitzer = max(0.5, 1.0 + dh_term + virial_term)
     
-    # Presión osmótica ajustada por Pitzer
-    return phi_pitzer * molaridad_total * r_const * temp_k
+    # Presión osmótica
+    pi = phi_pitzer * molaridad_total * r_const * temp_k
+    
+    return pi, {
+        "molaridad_total": molaridad_total,
+        "fuerza_ionica": fuerza_ionica,
+        "a_phi": a_phi,
+        "dh_term": dh_term,
+        "virial_term": virial_term,
+        "phi": phi_pitzer,
+        "temp_k": temp_k
+    }
 
 def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_perm, eluato_init, usar_pitzer=False):
     rec_frac = rec_target / 100.0
     q_perm = q_feed * rec_frac
     q_conc = q_feed - q_perm
 
-    # Selección de modelo termodinámico
     calc_pi = calcular_presion_osmotica_pitzer if usar_pitzer else calcular_presion_osmotica_vant_hoff
 
-    pi_feed = calc_pi(eluato_init, temp_c)
+    pi_feed, stats_feed = calc_pi(eluato_init, temp_c)
 
     conc_reject = {}
     conc_perm = {}
@@ -92,8 +105,8 @@ def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_pe
         c_c = (q_feed * c_feed - q_perm * c_p) / q_conc
         conc_reject[ion] = max(c_c, 0.0)
 
-    pi_conc = calc_pi(conc_reject, temp_c)
-    pi_perm = calc_pi(conc_perm, temp_c)
+    pi_conc, stats_conc = calc_pi(conc_reject, temp_c)
+    pi_perm, stats_perm = calc_pi(conc_perm, temp_c)
     pi_promedio = (pi_feed + pi_conc) / 2.0
 
     p_perdida_canal = 1.5
@@ -112,10 +125,12 @@ def simular_osmosis_inversa_etapa_unica(q_feed, rec_target, p_oper, temp_c, a_pe
     return {
         'q_feed': q_feed, 'q_perm': q_perm, 'q_conc': q_conc,
         'rec': rec_target, 'p_oper': p_oper, 'ndp': ndp,
-        'flux_lmh': flux_lmh, 'area_m2': area_m2,
-        'pi_feed': pi_feed, 'pi_conc': pi_conc,
+        'flux_lmh': flux_lmh, 'area_m2': area_m2, 'p_perdida': p_perdida_canal,
+        'pi_feed': pi_feed, 'pi_conc': pi_conc, 'pi_perm': pi_perm, 'pi_promedio': pi_promedio,
         'conc_reject': conc_reject, 'conc_perm': conc_perm,
-        'modelo_usado': "Pitzer (Riguroso Alta Salinidad)" if usar_pitzer else "Van't Hoff (Ideal)"
+        'stats_feed': stats_feed, 'stats_conc': stats_conc, 'stats_perm': stats_perm,
+        'modelo_usado': "Pitzer (Riguroso Alta Salinidad)" if usar_pitzer else "Van't Hoff (Ideal)",
+        'usar_pitzer': usar_pitzer, 'temp_k': stats_feed['temp_k']
     }
 
 # ==============================================================================
@@ -125,7 +140,7 @@ st.title("💧 Simulador de Ósmosis Inversa (1 Etapa)")
 st.subheader("Concentración de Eluato de Litio (DLE)")
 st.markdown("---")
 
-# BARRA LATERAL DE CONFIGURACIÓN (INPUTS DEL USUARIO)
+# BARRA LATERAL DE CONFIGURACIÓN
 with st.sidebar:
     st.header("⚙️ Configuración del Sistema")
     
@@ -141,7 +156,6 @@ with st.sidebar:
         help="Alta Presión activa el modelo termodinámico de Pitzer para soluciones de alta salinidad."
     )
     
-    # Asignación de valores por defecto dinámicos
     if tipo_ro == "Baja Presión (BWRO)":
         def_p, def_rec, def_a = 22.0, 65.0, 3.5
     else:
@@ -171,7 +185,6 @@ with st.sidebar:
                 format="%.5f" if default_val < 1.0 else "%.2f"
             )
 
-# Determinar si se activa Pitzer
 usar_pitzer = True if tipo_ro == "Alta Presión (SWRO)" else False
 
 # ==============================================================================
@@ -180,7 +193,6 @@ usar_pitzer = True if tipo_ro == "Alta Presión (SWRO)" else False
 try:
     res = simular_osmosis_inversa_etapa_unica(q_in, rec_in, p_in, t_in, a_in, eluato_dle_init, usar_pitzer=usar_pitzer)
     
-    # SECCIÓN 1: INDICADORES PRINCIPALES (KPIs)
     st.markdown(f"### 📊 Indicadores Clave de Concentración (Li+) — Modelo activo: *{res['modelo_usado']}*")
     
     li_in = eluato_dle_init['Li']
@@ -202,22 +214,22 @@ try:
         
     st.markdown("---")
     
-    # SECCIÓN 2: TABLAS DETALLADAS EN PESTAÑAS
-    tab1, tab2 = st.tabs(["⚙️ Resumen Operativo e Hidráulico", "🧪 Balance de Masa por Ion"])
+    # SECCIÓN 2: PESTAÑAS
+    tab1, tab2, tab3 = st.tabs(["⚙️ Resumen Operativo", "🧪 Balance de Masa por Ion", "📖 Memoria de Cálculo (Paso a Paso)"])
     
     with tab1:
         df_hidro = pd.DataFrame([
-            {'Parámetro Hidráulico / Operativo': 'Modelo Termodinámico de Presión Osmótica', 'Valor': res['modelo_usado']},
-            {'Parámetro Hidráulico / Operativo': 'Caudal de Alimentación (Feed)', 'Valor': f"{res['q_feed']:.2f} m³/h"},
-            {'Parámetro Hidráulico / Operativo': 'Caudal de Permeado (Agua Extraída)', 'Valor': f"{res['q_perm']:.2f} m³/h"},
-            {'Parámetro Hidráulico / Operativo': 'Caudal de Salmuera Concentrada (Rechazo)', 'Valor': f"{res['q_conc']:.2f} m³/h"},
-            {'Parámetro Hidráulico / Operativo': 'Recuperación del Sistema', 'Valor': f"{res['rec']:.1f} %"},
-            {'Parámetro Hidráulico / Operativo': 'Presión Operativa Aplicada', 'Valor': f"{res['p_oper']:.1f} bar"},
-            {'Parámetro Hidráulico / Operativo': 'Presión Osmótica Entrada (Eluato DLE)', 'Valor': f"{res['pi_feed']:.2f} bar"},
-            {'Parámetro Hidráulico / Operativo': 'Presión Osmótica Salida (Salmuera)', 'Valor': f"{res['pi_conc']:.2f} bar"},
-            {'Parámetro Hidráulico / Operativo': 'Presión Neta de Impulso (NDP)', 'Valor': f"{res['ndp']:.2f} bar"},
-            {'Parámetro Hidráulico / Operativo': 'Flujo de Membrana (Flux)', 'Valor': f"{res['flux_lmh']:.1f} LMH"},
-            {'Parámetro Hidráulico / Operativo': 'Área de Membrana Requerida', 'Valor': f"{res['area_m2']:.1f} m²"}
+            {'Parámetro': 'Modelo Termodinámico', 'Valor': res['modelo_usado']},
+            {'Parámetro': 'Caudal Alimentación', 'Valor': f"{res['q_feed']:.2f} m³/h"},
+            {'Parámetro': 'Caudal Permeado', 'Valor': f"{res['q_perm']:.2f} m³/h"},
+            {'Parámetro': 'Caudal Salmuera', 'Valor': f"{res['q_conc']:.2f} m³/h"},
+            {'Parámetro': 'Recuperación', 'Valor': f"{res['rec']:.1f} %"},
+            {'Parámetro': 'Presión Operativa', 'Valor': f"{res['p_oper']:.1f} bar"},
+            {'Parámetro': 'Presión Osmótica Entrada', 'Valor': f"{res['pi_feed']:.2f} bar"},
+            {'Parámetro': 'Presión Osmótica Salida', 'Valor': f"{res['pi_conc']:.2f} bar"},
+            {'Parámetro': 'NDP', 'Valor': f"{res['ndp']:.2f} bar"},
+            {'Parámetro': 'Flux', 'Valor': f"{res['flux_lmh']:.1f} LMH"},
+            {'Parámetro': 'Área Requerida', 'Valor': f"{res['area_m2']:.1f} m²"}
         ])
         st.dataframe(df_hidro, use_container_width=True, hide_index=True)
         
@@ -226,9 +238,78 @@ try:
             'Ion / Especie': list(eluato_dle_init.keys()),
             'Alimentación (mg/L)': [eluato_dle_init[k] for k in eluato_dle_init],
             'Salmuera Concentrada (mg/L)': [res['conc_reject'][k] for k in eluato_dle_init],
-            'Permeado - Agua Extraída (mg/L)': [res['conc_perm'][k] for k in eluato_dle_init]
+            'Permeado - Agua (mg/L)': [res['conc_perm'][k] for k in eluato_dle_init]
         })
         st.dataframe(df_quimico.round(2), use_container_width=True, hide_index=True)
+
+    # NUEVA PESTAÑA: MEMORIA DE CÁLCULO
+    with tab3:
+        st.header("1. Balances de Materia Globales e Iónicos")
+        st.markdown("Se determina el caudal de permeado ($Q_{perm}$) basado en la recuperación ($Y$) y, por diferencia, el caudal de rechazo ($Q_{conc}$).")
+        
+        st.latex(r"Q_{perm} = Q_{feed} \times \left(\frac{Y}{100}\right)")
+        st.markdown(f"**Ejecución:** $Q_{{perm}} = {res['q_feed']} \\times ({res['rec']}/100) = \\mathbf{{{res['q_perm']:.2f} \\text{{ m}}^3\\text{{/h}}}}$")
+        
+        st.latex(r"Q_{conc} = Q_{feed} - Q_{perm}")
+        st.markdown(f"**Ejecución:** $Q_{{conc}} = {res['q_feed']} - {res['q_perm']:.2f} = \\mathbf{{{res['q_conc']:.2f} \\text{{ m}}^3\\text{{/h}}}}$")
+
+        st.markdown("Para cada ion $i$, la concentración en el permeado depende del rechazo iónico ($R_i$), y el rechazo se calcula por balance de masa:")
+        st.latex(r"C_{perm,i} = C_{feed,i} \times (1 - R_i)")
+        st.latex(r"C_{conc,i} = \frac{Q_{feed} \cdot C_{feed,i} - Q_{perm} \cdot C_{perm,i}}{Q_{conc}}")
+        st.info("💡 *El simulador itera estas dos últimas fórmulas sobre todos los iones ingresados (ver pestaña 'Balance de Masa por Ion' para los resultados).*")
+
+        st.divider()
+
+        st.header("2. Termodinámica: Presión Osmótica ($\\pi$)")
+        if not res['usar_pitzer']:
+            st.markdown("### Modelo Ideal: Ecuación de Van't Hoff")
+            st.markdown("Asume soluciones diluidas donde las interacciones iónicas son despreciables. El coeficiente osmótico es $\Phi = 1$.")
+            st.latex(r"\pi = \sum \left( \frac{C_i}{MW_i} \right) \cdot R \cdot T")
+            
+            st.markdown("**Valores calculados (Corriente de Alimentación):**")
+            st.markdown(f"- $\\sum Molaridad = {res['stats_feed']['molaridad_total']:.4f} \\text{{ mol/L}}$")
+            st.markdown(f"- $R = 0.08314 \\text{{ L·bar/(mol·K)}}$")
+            st.markdown(f"- $T = {res['temp_k']:.2f} \\text{{ K}}$")
+            st.latex(fr"\pi_{{feed}} = {res['stats_feed']['molaridad_total']:.4f} \times 0.08314 \times {res['temp_k']:.2f} = \mathbf{{{res['pi_feed']:.2f} \text{{ bar}}}}")
+        
+        else:
+            st.markdown("### Modelo Riguroso: Ecuación de Pitzer")
+            st.markdown("Calcula un Coeficiente Osmótico ($\\Phi$) para corregir desviaciones por alta salinidad mediante la Fuerza Iónica ($I$), términos de Debye-Hückel electrostáticos y coeficientes viriales específicos.")
+            
+            st.latex(r"I = \frac{1}{2} \sum z_i^2 \cdot m_i")
+            st.latex(r"DH = - \frac{A_\phi \cdot I^{1.5}}{1 + 1.2 \cdot I^{0.5}}")
+            st.latex(r"Virial = B \cdot I + C \cdot I^2")
+            st.latex(r"\Phi = 1 + DH + Virial")
+            st.latex(r"\pi = \Phi \cdot \sum m_i \cdot R \cdot T")
+
+            st.markdown("**Valores calculados (Corriente de Salmuera Concentrada / Rechazo):**")
+            stats = res['stats_conc']
+            st.markdown(f"- $\\sum Molaridad = {stats['molaridad_total']:.4f} \\text{{ mol/L}}$")
+            st.markdown(f"- $I \\text{{ (Fuerza Iónica)}} = {stats['fuerza_ionica']:.4f}$")
+            st.markdown(f"- $A_\\phi \\text{{ (Parámetro DH a }} {res['temp_k']:.1f} \\text{{ K)}} = {stats['a_phi']:.4f}$")
+            st.markdown(f"- $DH \\text{{ (Término Electrostático)}} = {stats['dh_term']:.4f}$")
+            st.markdown(f"- $Virial \\text{{ (Interacciones de corto alcance)}} = {stats['virial_term']:.4f}$")
+            
+            st.latex(fr"\Phi_{{conc}} = 1 + ({stats['dh_term']:.4f}) + ({stats['virial_term']:.4f}) = \mathbf{{{stats['phi']:.4f}}}")
+            st.latex(fr"\pi_{{conc}} = {stats['phi']:.4f} \times {stats['molaridad_total']:.4f} \times 0.08314 \times {res['temp_k']:.2f} = \mathbf{{{res['pi_conc']:.2f} \text{{ bar}}}}")
+
+        st.divider()
+
+        st.header("3. Hidráulica de Membrana (Diseño RO)")
+        st.markdown("La Fuerza Motriz Neta (NDP) define si el sistema puede vencer la ósmosis natural y empujar agua limpia. Requiere promediar la presión osmótica de entrada y salida.")
+        
+        st.latex(r"\pi_{avg} = \frac{\pi_{feed} + \pi_{conc}}{2}")
+        st.markdown(f"**Ejecución:** $\\pi_{{avg}} = \\frac{{{res['pi_feed']:.2f} + {res['pi_conc']:.2f}}}{{2}} = \\mathbf{{{res['pi_promedio']:.2f} \\text{{ bar}}}}$")
+
+        st.latex(r"NDP = \left(P_{oper} - \frac{\Delta P_{canal}}{2}\right) - (\pi_{avg} - \pi_{perm})")
+        st.markdown(f"**Ejecución:** $NDP = \\left({res['p_oper']} - \\frac{{{res['p_perdida']}}}{{2}}\\right) - ({res['pi_promedio']:.2f} - {res['pi_perm']:.2f}) = \\mathbf{{{res['ndp']:.2f} \\text{{ bar}}}}$")
+
+        st.markdown("Finalmente, se calcula el Flujo de agua a través de los poros (Flux) y el Área de membrana total requerida:")
+        st.latex(r"Flux (J) = A_{perm} \times NDP")
+        st.markdown(f"**Ejecución:** $Flux = {a_in} \\times {res['ndp']:.2f} = \\mathbf{{{res['flux_lmh']:.2f} \\text{{ L/m}}^2\\cdot\\text{{h}}}}$")
+
+        st.latex(r"Area = \frac{Q_{perm} \cdot 1000}{Flux}")
+        st.markdown(f"**Ejecución:** $Area = \\frac{{{res['q_perm']:.2f} \cdot 1000}}{{{res['flux_lmh']:.2f}}} = \\mathbf{{{res['area_m2']:.2f} \\text{{ m}}^2}}$")
 
 # CAPTURA DE ERROR TERMODINÁMICO EN PANTALLA
 except ValueError as e:
