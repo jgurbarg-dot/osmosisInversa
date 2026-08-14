@@ -10,6 +10,31 @@ st.set_page_config(
 )
 
 # ==============================================================================
+# 0. SISTEMA DE SEGURIDAD (CONTRASEÑA)
+# ==============================================================================
+def check_password():
+    """Verifica la contraseña antes de cargar el resto de la aplicación."""
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+
+    if not st.session_state["password_correct"]:
+        st.warning("🔒 Por favor, ingresa la contraseña para acceder al simulador.")
+        password = st.text_input("Contraseña", type="password")
+        
+        if st.button("Ingresar"):
+            if password == "AdeIri61Azu":
+                st.session_state["password_correct"] = True
+                st.rerun()  # Recarga la página para mostrar el contenido
+            else:
+                st.error("❌ Contraseña incorrecta.")
+        
+        # Detiene la ejecución del script aquí si no está autenticado
+        st.stop()
+
+# Activamos el candado de seguridad
+check_password()
+
+# ==============================================================================
 # 1. PROPIEDADES TERMODINÁMICAS Y CONSTANTES
 # ==============================================================================
 MOLAR_MASS = {
